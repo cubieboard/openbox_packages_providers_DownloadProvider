@@ -138,7 +138,7 @@ public class DownloadThread extends Thread {
         PowerManager.WakeLock wakeLock = null;
         int finalStatus = Downloads.Impl.STATUS_UNKNOWN_ERROR;
         String errorMsg = null;
-
+        boolean downed = true;
         final NetworkPolicyManager netPolicy = NetworkPolicyManager.getSystemService(mContext);
         final PowerManager pm = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
 
@@ -169,7 +169,7 @@ public class DownloadThread extends Thread {
                         Proxy.getPreferredHttpHost(mContext, state.mRequestUri));
                 HttpGet request = new HttpGet(state.mRequestUri);
                 try {
-                    executeDownload(state, client, request);
+                    downed = executeDownload(state, client, request);
                     finished = true;
                 } catch (RetryDownload exc) {
                     // fall through
@@ -208,10 +208,14 @@ public class DownloadThread extends Thread {
                 client.close();
                 client = null;
             }
-            cleanupDestination(state, finalStatus);
-            notifyDownloadCompleted(finalStatus, state.mCountRetry, state.mRetryAfter,
-                                    state.mGotData, state.mFilename,
-                                    state.mNewUri, state.mMimeType, errorMsg);
+            if (downed) {
+                cleanupDestination(state, finalStatus);
+                notifyDownloadCompleted(finalStatus, state.mCountRetry, state.mRetryAfter,
+                                        state.mGotData, state.mFilename,
+                                        state.mNewUri, state.mMimeType, errorMsg);
+            } else {
+                Log.v(Constants.TAG, "already downloaded,ignore");
+            }
             DownloadHandler.getInstance().dequeueDownload(mInfo.mId);
 
             netPolicy.unregisterListener(mPolicyListener);
@@ -221,14 +225,16 @@ public class DownloadThread extends Thread {
                 wakeLock = null;
             }
         }
-        mStorageManager.incrementNumDownloadsSoFar();
+        if (downed) {
+            mStorageManager.incrementNumDownloadsSoFar();
+        }
     }
 
     /**
      * Fully execute a single download request - setup and send the request, handle the response,
      * and transfer the data to the destination file.
      */
-    private void executeDownload(State state, AndroidHttpClient client, HttpGet request)
+    private boolean executeDownload(State state, AndroidHttpClient client, HttpGet request)
             throws StopRequestException, RetryDownload {
         InnerState innerState = new InnerState();
         byte data[] = new byte[Constants.BUFFER_SIZE];
@@ -240,7 +246,7 @@ public class DownloadThread extends Thread {
         if (state.mCurrentBytes == state.mTotalBytes) {
             Log.i(Constants.TAG, "Skipping initiating request for download " +
                   mInfo.mId + "; already completed");
-            return;
+            return false;
         }
 
         // check just before sending the request to avoid using an invalid connection at all
@@ -256,6 +262,7 @@ public class DownloadThread extends Thread {
         processResponseHeaders(state, innerState, response);
         InputStream entityStream = openResponseEntity(state, response);
         transferData(state, innerState, data, entityStream);
+        return true;
     }
 
     /**
@@ -345,7 +352,10 @@ public class DownloadThread extends Thread {
         FileOutputStream downloadedFileStream = null;
         try {
             downloadedFileStream = new FileOutputStream(state.mFilename, true);
-            downloadedFileStream.getFD().sync();
+            if ( (state.mFilename.lastIndexOf("extFile") == -1) && (state.mFilename.lastIndexOf("uriFile") == -1)
+                && (state.mFilename.lastIndexOf("publicFile") == -1) && (state.mFilename.lastIndexOf("noiseandchirps") == -1) ) {
+                downloadedFileStream.getFD().sync();
+            }
         } catch (FileNotFoundException ex) {
             Log.w(Constants.TAG, "file " + state.mFilename + " not found: " + ex);
         } catch (SyncFailedException ex) {
